@@ -141,9 +141,6 @@ async def send_simple_relay(
     return sent
 
 
-# --- Chat & Auto-Delete Commands (Owner Only) ---
-
-
 async def chat_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_owner(update) or not update.message:
         return
@@ -237,9 +234,6 @@ async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-# --- /id Command (Owner Only: Reply for Name/Username/ID, Else Chat ID) ---
-
-
 async def id_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_owner(update) or not update.message:
         return
@@ -259,9 +253,6 @@ async def id_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             f"Chat ID: {chat.id}\nYour ID: {update.effective_user.id}"
         )
-
-
-# --- /link Command (Owner Sets Link, Any User Fetches in Group) ---
 
 
 async def link_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -301,9 +292,6 @@ async def handle_pending_link(
             group_link_by_chat[chat_id] = text
             awaiting_link_owner.discard(key)
             await update.message.reply_text("Link set kar diya gaya hai.")
-
-
-# --- Moderation & Group Commands (Owner Only) ---
 
 
 async def info_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -568,9 +556,6 @@ async def slowmode_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.warning(f"Slowmode failed: {e}")
 
 
-# --- Lightweight HTTP Server for Render / UptimeRobot 200 OK ---
-
-
 async def _handle_http_client(
     reader: asyncio.StreamReader, writer: asyncio.StreamWriter
 ):
@@ -581,8 +566,9 @@ async def _handle_http_client(
             b"HTTP/1.1 200 OK\r\n"
             b"Content-Type: text/plain; charset=utf-8\r\n"
             b"Content-Length: " + str(len(body)).encode() + b"\r\n"
-            b"Connection: close\r\n\r\n" + body)
-            writer.write(response)
+            b"Connection: close\r\n\r\n" + body
+        )
+        writer.write(response)
         await writer.drain()
     except Exception:
         pass
