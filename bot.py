@@ -4,6 +4,7 @@ import logging
 from datetime import timedelta
 from telegram import Update, ChatPermissions
 from telegram.ext import (
+    Application,
     ApplicationBuilder,
     CommandHandler,
     MessageHandler,
@@ -11,13 +12,17 @@ from telegram.ext import (
     filters,
 )
 
-BOT_TOKEN = os.getenv("BOT_TOKEN", "")
+BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
+PORT = int(os.getenv("PORT", "10000"))
 OWNER_ID = 8283878643
 DEFAULT_AUTO_DELETE_SECONDS = 30
 MAX_WARNINGS = 3
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    level=logging.INFO,
+)
+logger = logging.getLogger("SanskariManager")
 
 timer_by_chat: dict[int, int | None] = {}
 last_bot_msg_by_chat: dict[int, int] = {}
@@ -39,7 +44,8 @@ async def delete_after_delay(
     context: ContextTypes.DEFAULT_TYPE, chat_id: int, message_id: int, delay: int
 ):
     task = asyncio.current_task()
-    active_tasks_by_chat.setdefault(chat_id, set()).add(task)
+    if task:
+        active_tasks_by_chat.setdefault(chat_id, set()).add(task)
     try:
         await asyncio.sleep(delay)
         await context.bot.delete_message(chat_id=chat_id, message_id=message_id)
@@ -48,7 +54,8 @@ async def delete_after_delay(
     except Exception as e:
         logger.warning(f"Auto-delete failed ({chat_id}/{message_id}): {e}")
     finally:
-        active_tasks_by_chat.get(chat_id, set()).discard(task)
+        if task and chat_id in active_tasks_by_chat:
+            active_tasks_by_chat[chat_id].discard(task)
 
 
 def schedule_autodelete(
@@ -78,54 +85,63 @@ async def send_simple_relay(
     chat_id = update.effective_chat.id
     sent = None
 
-    source_media_msg = msg.reply_to_message if (msg.reply_to_message and not text) else msg
+    source_media_msg = (
+        msg.reply_to_message if (msg.reply_to_message and not text) else msg
+    )
     caption = text if text is not None else (msg.caption or None)
 
-    if source_media_msg.photo:
-        sent = await context.bot.send_photo(
-            chat_id=chat_id,
-            photo=source_media_msg.photo[-1].file_id,
-            caption=caption,
-            reply_to_message_id=reply_to_id,
-        )
-    elif source_media_msg.document:
-        sent = await context.bot.send_document(
-            chat_id=chat_id,
-            document=source_media_msg.document.file_id,
-            caption=caption,
-            reply_to_message_id=reply_to_id,
-        )
-    elif source_media_msg.video:
-        sent = await context.bot.send_video(
-            chat_id=chat_id,
-            video=source_media_msg.video.file_id,
-            caption=caption,
-            reply_to_message_id=reply_to_id,
-        )
-    elif source_media_msg.voice:
-        sent = await context.bot.send_voice(
-            chat_id=chat_id,
-            voice=source_media_msg.voice.file_id,
-            caption=caption,
-            reply_to_message_id=reply_to_id,
-        )
-    elif source_media_msg.sticker:
-        sent = await context.bot.send_sticker(
-            chat_id=chat_id,
-            sticker=source_media_msg.sticker.file_id,
-            reply_to_message_id=reply_to_id,
-        )
-    elif text:
-        sent = await context.bot.send_message(
-            chat_id=chat_id,
-            text=text,
-            reply_to_message_id=reply_to_id,
-        )
+    try:
+        if source_media_msg.photo:
+            sent = await context.bot.send_photo(
+                chat_id=chat_id,
+                photo=source_media_msg.photo[-1].file_id,
+                caption=caption,
+                reply_to_message_id=reply_to_id,
+            )
+        elif source_media_msg.document:
+            sent = await context.bot.send_document(
+                chat_id=chat_id,
+                document=source_media_msg.document.file_id,
+                caption=caption,
+                reply_to_message_id=reply_to_id,
+            )
+        elif source_media_msg.video:
+            sent = await context.bot.send_video(
+                chat_id=chat_id,
+                video=source_media_msg.video.file_id,
+                caption=caption,
+                reply_to_message_id=reply_to_id,
+            )
+        elif source_media_msg.voice:
+            sent = await context.bot.send_voice(
+                chat_id=chat_id,
+                voice=source_media_msg.voice.file_id,
+                caption=caption,
+                reply_to_message_id=reply_to_id,
+            )
+        elif source_media_msg.sticker:
+            sent = await context.bot.send_sticker(
+                chat_id=chat_id,
+                sticker=source_media_msg.sticker.file_id,
+                reply_to_message_id=reply_to_id,
+            )
+        elif text:
+            sent = await context.bot.send_message(
+                chat_id=chat_id,
+                text=text,
+                reply_to_message_id=reply_to_id,
+            )
+    except Exception as e:
+        logger.warning(f"Relay failed in chat {chat_id}: {e}")
+        return None
 
     if sent:
         last_bot_msg_by_chat[chat_id] = sent.message_id
         schedule_autodelete(context, chat_id, sent.message_id)
     return sent
+
+
+# --- Chat & Auto-Delete Commands (Owner Only) ---
 
 
 async def chat_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -221,6 +237,9 @@ async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+# --- /id Command (Owner Only: Reply for Name/Username/ID, Else Chat ID) ---
+
+
 async def id_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_owner(update) or not update.message:
         return
@@ -240,6 +259,9 @@ async def id_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             f"Chat ID: {chat.id}\nYour ID: {update.effective_user.id}"
         )
+
+
+# --- /link Command (Owner Sets Link, Any User Fetches in Group) ---
 
 
 async def link_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -281,6 +303,9 @@ async def handle_pending_link(
             await update.message.reply_text("Link set kar diya gaya hai.")
 
 
+# --- Moderation & Group Commands (Owner Only) ---
+
+
 async def info_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_owner(update) or not update.message or not update.message.reply_to_message:
         return
@@ -301,8 +326,13 @@ async def ban_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not u:
         return
     reason = " ".join(context.args).strip() if context.args else "No reason"
-    await context.bot.ban_chat_member(chat_id=update.effective_chat.id, user_id=u.id)
-    await update.message.reply_text(f"Banned {u.full_name} ({u.id}) | Reason: {reason}")
+    try:
+        await context.bot.ban_chat_member(chat_id=update.effective_chat.id, user_id=u.id)
+        await update.message.reply_text(
+            f"Banned {u.full_name} ({u.id}) | Reason: {reason}"
+        )
+    except Exception as e:
+        logger.warning(f"Ban failed: {e}")
 
 
 async def unban_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -311,10 +341,13 @@ async def unban_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     u = update.message.reply_to_message.from_user
     if not u:
         return
-    await context.bot.unban_chat_member(
-        chat_id=update.effective_chat.id, user_id=u.id, only_if_banned=True
-    )
-    await update.message.reply_text(f"Unbanned {u.full_name} ({u.id})")
+    try:
+        await context.bot.unban_chat_member(
+            chat_id=update.effective_chat.id, user_id=u.id, only_if_banned=True
+        )
+        await update.message.reply_text(f"Unbanned {u.full_name} ({u.id})")
+    except Exception as e:
+        logger.warning(f"Unban failed: {e}")
 
 
 async def kick_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -324,9 +357,12 @@ async def kick_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not u:
         return
     chat_id = update.effective_chat.id
-    await context.bot.ban_chat_member(chat_id=chat_id, user_id=u.id)
-    await context.bot.unban_chat_member(chat_id=chat_id, user_id=u.id)
-    await update.message.reply_text(f"Kicked {u.full_name} ({u.id})")
+    try:
+        await context.bot.ban_chat_member(chat_id=chat_id, user_id=u.id)
+        await context.bot.unban_chat_member(chat_id=chat_id, user_id=u.id)
+        await update.message.reply_text(f"Kicked {u.full_name} ({u.id})")
+    except Exception as e:
+        logger.warning(f"Kick failed: {e}")
 
 
 async def mute_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -348,13 +384,16 @@ async def mute_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except ValueError:
             until_date = None
 
-    await context.bot.restrict_chat_member(
-        chat_id=update.effective_chat.id,
-        user_id=u.id,
-        permissions=ChatPermissions(can_send_messages=False),
-        until_date=until_date,
-    )
-    await update.message.reply_text(f"Muted {u.full_name} ({u.id})")
+    try:
+        await context.bot.restrict_chat_member(
+            chat_id=update.effective_chat.id,
+            user_id=u.id,
+            permissions=ChatPermissions(can_send_messages=False),
+            until_date=until_date,
+        )
+        await update.message.reply_text(f"Muted {u.full_name} ({u.id})")
+    except Exception as e:
+        logger.warning(f"Mute failed: {e}")
 
 
 async def unmute_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -375,10 +414,13 @@ async def unmute_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         can_send_other_messages=True,
         can_add_web_page_previews=True,
     )
-    await context.bot.restrict_chat_member(
-        chat_id=update.effective_chat.id, user_id=u.id, permissions=perms
-    )
-    await update.message.reply_text(f"Unmuted {u.full_name} ({u.id})")
+    try:
+        await context.bot.restrict_chat_member(
+            chat_id=update.effective_chat.id, user_id=u.id, permissions=perms
+        )
+        await update.message.reply_text(f"Unmuted {u.full_name} ({u.id})")
+    except Exception as e:
+        logger.warning(f"Unmute failed: {e}")
 
 
 async def warning_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -393,7 +435,10 @@ async def warning_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     warnings_by_chat_user[key] = count
     if count >= MAX_WARNINGS:
         warnings_by_chat_user[key] = 0
-        await context.bot.ban_chat_member(chat_id=chat_id, user_id=u.id)
+        try:
+            await context.bot.ban_chat_member(chat_id=chat_id, user_id=u.id)
+        except Exception as e:
+            logger.warning(f"Auto-ban on max warnings failed: {e}")
         await update.message.reply_text(
             f"{u.full_name} ({u.id}) reached {MAX_WARNINGS}/{MAX_WARNINGS} warnings and was banned."
         )
@@ -410,7 +455,9 @@ async def warns_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not u:
         return
     count = warnings_by_chat_user.get((update.effective_chat.id, u.id), 0)
-    await update.message.reply_text(f"{u.full_name} ({u.id}) has {count}/{MAX_WARNINGS} warnings.")
+    await update.message.reply_text(
+        f"{u.full_name} ({u.id}) has {count}/{MAX_WARNINGS} warnings."
+    )
 
 
 async def resetwarns_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -426,24 +473,30 @@ async def resetwarns_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def pin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_owner(update) or not update.message or not update.message.reply_to_message:
         return
-    await context.bot.pin_chat_message(
-        chat_id=update.effective_chat.id,
-        message_id=update.message.reply_to_message.message_id,
-        disable_notification=True,
-    )
+    try:
+        await context.bot.pin_chat_message(
+            chat_id=update.effective_chat.id,
+            message_id=update.message.reply_to_message.message_id,
+            disable_notification=True,
+        )
+    except Exception as e:
+        logger.warning(f"Pin failed: {e}")
     await safe_delete(update.message)
 
 
 async def unpin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_owner(update) or not update.message:
         return
-    if update.message.reply_to_message:
-        await context.bot.unpin_chat_message(
-            chat_id=update.effective_chat.id,
-            message_id=update.message.reply_to_message.message_id,
-        )
-    else:
-        await context.bot.unpin_all_chat_messages(chat_id=update.effective_chat.id)
+    try:
+        if update.message.reply_to_message:
+            await context.bot.unpin_chat_message(
+                chat_id=update.effective_chat.id,
+                message_id=update.message.reply_to_message.message_id,
+            )
+        else:
+            await context.bot.unpin_all_chat_messages(chat_id=update.effective_chat.id)
+    except Exception as e:
+        logger.warning(f"Unpin failed: {e}")
     await safe_delete(update.message)
 
 
@@ -453,19 +506,24 @@ async def purge_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     start_id = update.message.reply_to_message.message_id
     end_id = update.message.message_id
-    await context.bot.delete_messages(
-        chat_id=chat_id, message_ids=list(range(start_id, end_id + 1))
-    )
+    msg_ids = list(range(start_id, end_id + 1))
+    try:
+        await context.bot.delete_messages(chat_id=chat_id, message_ids=msg_ids)
+    except Exception as e:
+        logger.warning(f"Purge failed: {e}")
 
 
 async def lock_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_owner(update) or not update.message:
         return
-    await context.bot.set_chat_permissions(
-        chat_id=update.effective_chat.id,
-        permissions=ChatPermissions(can_send_messages=False),
-    )
-    await update.message.reply_text("Group locked.")
+    try:
+        await context.bot.set_chat_permissions(
+            chat_id=update.effective_chat.id,
+            permissions=ChatPermissions(can_send_messages=False),
+        )
+        await update.message.reply_text("Group locked.")
+    except Exception as e:
+        logger.warning(f"Lock failed: {e}")
 
 
 async def unlock_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -483,10 +541,13 @@ async def unlock_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         can_send_other_messages=True,
         can_add_web_page_previews=True,
     )
-    await context.bot.set_chat_permissions(
-        chat_id=update.effective_chat.id, permissions=perms
-    )
-    await update.message.reply_text("Group unlocked.")
+    try:
+        await context.bot.set_chat_permissions(
+            chat_id=update.effective_chat.id, permissions=perms
+        )
+        await update.message.reply_text("Group unlocked.")
+    except Exception as e:
+        logger.warning(f"Unlock failed: {e}")
 
 
 async def slowmode_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -496,17 +557,69 @@ async def slowmode_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     delay = 0 if arg == "off" else (int(arg) if arg.isdigit() else None)
     if delay is None:
         return
-    await context.bot.set_chat_slow_mode_delay(
-        chat_id=update.effective_chat.id, slow_mode_delay=delay
+    try:
+        await context.bot.set_chat_slow_mode_delay(
+            chat_id=update.effective_chat.id, slow_mode_delay=delay
+        )
+        await update.message.reply_text(
+            f"Slowmode: {'OFF' if delay == 0 else f'{delay}s'}"
+        )
+    except Exception as e:
+        logger.warning(f"Slowmode failed: {e}")
+
+
+# --- Lightweight HTTP Server for Render / UptimeRobot 200 OK ---
+
+
+async def _handle_http_client(
+    reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+):
+    try:
+        await reader.read(1024)
+        body = b"OK"
+        response = (
+            b"HTTP/1.1 200 OK\r\n"
+            b"Content-Type: text/plain; charset=utf-8\r\n"
+            b"Content-Length: " + str(len(body)).encode() + b"\r\n"
+            b"Connection: close\r\n\r\n" + body)
+            writer.write(response)
+        await writer.drain()
+    except Exception:
+        pass
+    finally:
+        try:
+            writer.close()
+            await writer.wait_closed()
+        except Exception:
+            pass
+
+
+async def start_health_server(app: Application):
+    server = await asyncio.start_server(
+        _handle_http_client, host="0.0.0.0", port=PORT
     )
-    await update.message.reply_text(f"Slowmode: {'OFF' if delay == 0 else f'{delay}s'}")
+    app.bot_data["health_server"] = server
+    logger.info(f"Health server listening on 0.0.0.0:{PORT}")
+
+
+async def stop_health_server(app: Application):
+    server = app.bot_data.get("health_server")
+    if server:
+        server.close()
+        await server.wait_closed()
 
 
 def main():
     if not BOT_TOKEN:
         raise RuntimeError("BOT_TOKEN environment variable is required.")
 
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
+    app = (
+        ApplicationBuilder()
+        .token(BOT_TOKEN)
+        .post_init(start_health_server)
+        .post_shutdown(stop_health_server)
+        .build()
+    )
 
     app.add_handler(CommandHandler("chat", chat_cmd))
     app.add_handler(CommandHandler("reply", reply_cmd))
@@ -537,8 +650,8 @@ def main():
         MessageHandler(filters.TEXT & ~filters.COMMAND, handle_pending_link)
     )
 
-    logger.info("Bot started.")
-    app.run_polling()
+    logger.info("Sanskari Manager started.")
+    app.run_polling(drop_pending_updates=True)
 
 
 if __name__ == "__main__":
